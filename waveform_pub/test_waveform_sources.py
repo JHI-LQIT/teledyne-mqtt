@@ -1,20 +1,28 @@
 """Exercise the T3DSO1204 wire format without an oscilloscope."""
 
 import struct
+import sys
 import threading
-from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from types import ModuleType, SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
 
 import numpy as np
 import pytest
+import pyvisa
 
 from scope_settings import get_default_scope_settings, prepare_settings_update
 from waveform_data_capture import WaveformDataCaptureManager
 from waveform_mqtt_handler import WaveformMQTTHandler
-from waveform_sources import CaptureInterrupted, SyntheticSource, TeledyneSource, _decode_dat2
+from waveform_pub import main
+from waveform_sources import CaptureInterrupted, SyntheticSource, TeledyneSource, _decode_dat2, list_usb_resources
 
 
-def test_visa_capture_to_mqtt_preserves_scaling_timing_and_units():
+USB_SCOPE = "USB0::0x1234::0x5678::SCOPE::INSTR"
+USB_OTHER = "USB0::0x1234::0x5678::OTHER::INSTR"
+
+
+@pytest.mark.parametrize("connection", ["ethernet", "usb", "usb-discovery"])
+def test_visa_capture_to_mqtt_preserves_scaling_timing_and_units(connection):
     settings, _ = prepare_settings_update(get_default_scope_settings(), {
         "sampling": {"num_samples": 4, "transfer_stride": 2},
         "trigger_settings": {"mode": "normal"},
@@ -44,8 +52,26 @@ def test_visa_capture_to_mqtt_preserves_scaling_timing_and_units():
         b"DAT2,#14\x00\x01\x01\x00\n\n",
     ]
     resource_manager = Mock()
-    resource_manager.open_resource.return_value = scope
-    capture = WaveformDataCaptureManager(settings, source=TeledyneSource(settings, "scope.local"))
+    if connection == "ethernet":
+        address = "TCPIP0::scope.local::inst0::INSTR"
+        source = TeledyneSource(settings, "scope.local")
+    else:
+        address = USB_SCOPE
+        source = TeledyneSource(
+            settings,
+            usb_resource=USB_SCOPE if connection == "usb" else None,
+            visa_backend="@ivi",
+        )
+    if connection == "usb-discovery":
+        resource_manager.list_resources.return_value = (USB_OTHER, USB_SCOPE)
+        other_probe = MagicMock()
+        other_probe.__enter__.return_value.query.return_value = "Other,Unrelated,123,1.0"
+        scope_probe = MagicMock()
+        scope_probe.__enter__.return_value.query.return_value = replies["*IDN?"]
+        resource_manager.open_resource.side_effect = [other_probe, scope_probe, scope]
+    else:
+        resource_manager.open_resource.return_value = scope
+    capture = WaveformDataCaptureManager(settings, source=source)
     with patch("waveform_sources.pyvisa.ResourceManager", return_value=resource_manager):
         try:
             capture.open_device()
@@ -53,8 +79,18 @@ def test_visa_capture_to_mqtt_preserves_scaling_timing_and_units():
         finally:
             capture.close_device()
 
-    resource_manager.open_resource.assert_called_once()
-    assert resource_manager.open_resource.call_args.args == ("TCPIP0::scope.local::inst0::INSTR",)
+    if connection == "usb-discovery":
+        resource_manager.list_resources.assert_called_once_with("USB?*::INSTR")
+        assert [call.args[0] for call in resource_manager.open_resource.call_args_list] == [
+            USB_OTHER, USB_SCOPE, USB_SCOPE
+        ]
+        other_probe.__exit__.assert_called_once()
+        scope_probe.__exit__.assert_called_once()
+    else:
+        resource_manager.list_resources.assert_not_called()
+        resource_manager.open_resource.assert_called_once()
+    assert resource_manager.open_resource.call_args.args == (address,)
+    assert resource_manager.open_resource.call_args.kwargs["read_termination"] is None
     assert [call.args[0] for call in scope.write.call_args_list] == [
         "STOP", "WFSU SP,2,NP,4,FP,0", "TRMD SINGLE", "STOP",
         "C1:WF? DAT2", "C4:WF? DAT2", "STOP",
@@ -123,3 +159,52 @@ def test_simulation_uses_regular_acquisition_and_averaging():
     assert first["channels_mv"]["A"].shape == (1, 20)
     assert not first["processing_info"]["A"]["ready"]
     assert second["processing_info"]["A"]["ready"]
+
+
+def test_usb_discovery_requires_explicit_selection_if_two_scopes_match():
+    manager = Mock()
+    manager.list_resources.return_value = (USB_SCOPE, USB_OTHER)
+    probes = [MagicMock(), MagicMock()]
+    for probe in probes:
+        probe.__enter__.return_value.query.return_value = "Teledyne LeCroy,T3DSO1204,X,1.0"
+    manager.open_resource.side_effect = probes
+    source = TeledyneSource(get_default_scope_settings(), visa_backend="@ivi")
+    with patch("waveform_sources.pyvisa.ResourceManager", return_value=manager):
+        with pytest.raises(RuntimeError, match="Multiple T3DSO1204 scopes found.*--usb-resource"):
+            source.open()
+    for probe in probes:
+        probe.__exit__.assert_called_once()
+        probe.__enter__.return_value.write.assert_not_called()
+    manager.close.assert_called_once()
+
+
+def test_usb_discovery_explains_no_instruments():
+    manager = Mock()
+    manager.list_resources.side_effect = pyvisa.errors.VisaIOError(
+        pyvisa.constants.StatusCode.error_resource_not_found
+    )
+    source = TeledyneSource(get_default_scope_settings(), visa_backend="@ivi")
+    with patch("waveform_sources.pyvisa.ResourceManager", return_value=manager):
+        with pytest.raises(RuntimeError, match="No T3DSO1204 found over USB.*--list-usb"):
+            source.open()
+    manager.open_resource.assert_not_called()
+    manager.close.assert_called_once()
+
+
+def test_pyvisa_py_usb_enumeration_does_not_scan_lan():
+    manager = Mock()
+    usb_session = ModuleType("pyvisa_py.usb")
+    usb_session.USBInstrSession = Mock()
+    usb_session.USBInstrSession.list_resources.return_value = [USB_SCOPE]
+    with patch.dict(sys.modules, {"pyvisa_py.usb": usb_session}):
+        assert list_usb_resources(manager, "@py") == (USB_SCOPE,)
+    manager.list_resources.assert_not_called()
+
+
+def test_list_usb_command_lists_resources_and_closes_manager(capsys):
+    manager = Mock()
+    manager.list_resources.return_value = (USB_SCOPE,)
+    with patch("waveform_pub.pyvisa.ResourceManager", return_value=manager):
+        assert main(["--list-usb", "--visa-backend", "@ivi"]) == 0
+    assert capsys.readouterr().out.strip() == USB_SCOPE
+    manager.close.assert_called_once()

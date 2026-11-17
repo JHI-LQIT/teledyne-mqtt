@@ -3,6 +3,7 @@
 import logging
 import math
 import re
+import sys
 import time
 
 import numpy as np
@@ -53,12 +54,48 @@ def _decode_dat2(reply, max_points):
     return np.frombuffer(reply, dtype=np.uint8, count=count, offset=start)
 
 
-class TeledyneSource:
-    """Acquire coherent analog frames over a VXI-11 LAN session."""
+def usb_visa_backend(override=None):
+    """Use installed VISA on Windows and PyVISA-py on other platforms."""
+    return override or ("@ivi" if sys.platform == "win32" else "@py")
 
-    def __init__(self, scope_settings, host):
+
+def list_usb_resources(manager, backend):
+    """List USBTMC instruments without probing the network."""
+    if backend == "@py":
+        # The PyVISA-py resource manager scans every interface before filtering.
+        try:
+            from pyvisa_py.usb import USBInstrSession
+        except (ImportError, OSError, ValueError) as error:
+            raise RuntimeError(
+                "PyVISA-py could not initialize USB. Check PyUSB, libusb, "
+                "and USB access for this user. See the README for setup."
+            ) from error
+        return tuple(USBInstrSession.list_resources())
+
+    try:
+        return manager.list_resources("USB?*::INSTR")
+    except pyvisa.errors.VisaIOError as error:
+        if error.error_code != pyvisa.constants.StatusCode.error_resource_not_found:
+            raise
+        return ()
+
+
+def _is_t3dso1204(identity):
+    fields = identity.split(",")
+    return len(fields) >= 2 and fields[1].strip().upper() == "T3DSO1204"
+
+
+class TeledyneSource:
+    """Acquire coherent analog frames over USBTMC or VXI-11."""
+
+    def __init__(self, scope_settings, host=None, *, usb_resource=None, visa_backend=None):
+        if host and usb_resource:
+            raise ValueError("Specify either a LAN host or a USB VISA resource")
+        if usb_resource and not re.fullmatch(r"USB\d*::.+::INSTR", usb_resource, re.IGNORECASE):
+            raise ValueError("Expected a USB VISA INSTR resource, as returned by --list-usb")
         self.scope_settings = scope_settings
-        self.host = host
+        self.resource = f"TCPIP0::{host}::inst0::INSTR" if host else usb_resource
+        self.visa_backend = (visa_backend or "@py") if host else usb_visa_backend(visa_backend)
         self.manager = None
         self.scope = None
         self._configured = False
@@ -66,22 +103,47 @@ class TeledyneSource:
     def update_settings(self, settings):
         self.scope_settings = settings
 
-    def open(self):
-        self.manager = pyvisa.ResourceManager("@py")
-        try:
-            self.scope = self.manager.open_resource(
-                f"TCPIP0::{self.host}::inst0::INSTR",
-                open_timeout=3000,
-                timeout=3000,
-                write_termination="\n",
-                read_termination=None,
-                chunk_size=256 * 1024,
+    def _open_resource(self, address, *, timeout=3000):
+        return self.manager.open_resource(
+            address,
+            open_timeout=timeout,
+            timeout=timeout,
+            write_termination="\n",
+            read_termination=None,
+            chunk_size=256 * 1024,
+        )
+
+    def _discover_usb_scope(self):
+        matches = []
+        probe_errors = []
+        for address in list_usb_resources(self.manager, self.visa_backend):
+            try:
+                with self._open_resource(address, timeout=1000) as probe:
+                    if _is_t3dso1204(probe.query("*IDN?")):
+                        matches.append(address)
+            except (OSError, pyvisa.errors.VisaIOError) as error:
+                probe_errors.append(f"{address}: {error}")
+        if len(matches) > 1:
+            choices = ", ".join(matches)
+            raise RuntimeError(f"Multiple T3DSO1204 scopes found. Use --usb-resource with one of: {choices}")
+        if not matches:
+            details = f" VISA errors: {'; '.join(probe_errors)}." if probe_errors else ""
+            raise RuntimeError(
+                "No T3DSO1204 found over USB. Check the rear USB Device cable, "
+                "select USBTMC in Utility > IO Set, and run --list-usb. "
+                "See the README for USB driver and permission setup." + details
             )
+        return matches[0]
+
+    def open(self):
+        self.manager = pyvisa.ResourceManager(self.visa_backend)
+        try:
+            address = self.resource or self._discover_usb_scope()
+            self.scope = self._open_resource(address)
             identity = self.scope.query("*IDN?").strip()
-            fields = identity.split(",")
-            if len(fields) < 2 or fields[1].strip().upper() != "T3DSO1204":
-                raise RuntimeError(f"Expected a T3DSO1204, received {identity!r}")
-            logger.info("Connected to %s", identity)
+            if not _is_t3dso1204(identity):
+                raise RuntimeError(f"Expected a T3DSO1204 at {address}, received {identity!r}")
+            logger.info("Connected to %s at %s", identity, address)
             self.configure()
         except Exception:
             try:

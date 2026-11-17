@@ -1,8 +1,10 @@
 # Configuration for Teledyne MQTT
 # This file controls MQTT broker settings for all modules
 scope:
-  host: ""  # IP address or hostname of the T3DSO1204 on the LAN
-
+  transport: usb  # usb or lan
+  # usb_resource: "USB0::0xVID::0xPID::SERIAL::INSTR"  # Leave unset for discovery.
+  # visa_backend: "@py"  # USB defaults to @ivi on Windows and @py elsewhere.
+  # host: "192.168.1.50"  # For scope.transport: lan
 
 mqtt:
   # Broker connection settings
