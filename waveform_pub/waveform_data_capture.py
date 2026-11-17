@@ -128,7 +128,8 @@ class WaveformDataCaptureManager:
         frame = self.source.capture(interrupt)
         axis = frame["time_axis"]
         grid = (
-            len(axis), axis[0], frame["actual_sample_rate"], frame.get("transfer_stride", 1)
+            len(axis), axis[0], frame["actual_sample_rate"], frame.get("transfer_stride", 1),
+            tuple(frame["channels_mv"]),
         )
         if grid != self._last_grid:
             self.postprocessor.reset()

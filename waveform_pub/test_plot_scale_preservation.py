@@ -50,3 +50,42 @@ def test_first_frame_fits_before_the_plot_range_is_locked(monkeypatch):
         np.testing.assert_allclose(plot.viewRange(), zoom)
     finally:
         manager.close_plots()
+
+
+def test_follow_scope_uses_channel_divisions_and_refits_changed_timebase(monkeypatch):
+    import numpy as np
+
+    from waveform_plot_manager import WaveformPlotManager
+
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    manager = WaveformPlotManager()
+    plot = manager.setup_plots()
+    try:
+        frame = {
+            "follow_scope": True,
+            "channels_mv": {"B": np.array([[100.0, 200.0, 300.0]])},
+            "time_axis": np.array([-0.1, 0.0, 0.1]),
+            "actual_sample_rate": 10,
+            "seconds_per_div": 0.02,
+            "trigger_delay_s": 0,
+            "scope_record_points": 3,
+            "raw_sample_count": 3,
+            "channel_settings": [{"channel": "B", "volts_per_div": 0.1, "offset_volts": -0.2}],
+        }
+        manager.display_capture(frame)
+        assert plot.getAxis("left").labelUnits == "div"
+        np.testing.assert_allclose(manager.plot_curves["B"].getData()[1], [-1, 0, 1], atol=1e-12)
+        assert "Scope: 3 pts/ch" in manager.status_bar.currentMessage()
+        assert "Timebase: 20 ms/div" in manager.status_bar.currentMessage()
+
+        frame.update(time_axis=frame["time_axis"] * 100, seconds_per_div=2, actual_sample_rate=0.1)
+        manager.display_capture(frame)
+        xmin, xmax = plot.viewRange()[0]
+        assert xmin <= -10 < 10 <= xmax
+
+        frame["follow_scope"] = False
+        manager.display_capture(frame)
+        assert plot.getAxis("left").labelUnits == "V"
+        np.testing.assert_allclose(manager.plot_curves["B"].getData()[1], [100, 200, 300])
+    finally:
+        manager.close_plots()

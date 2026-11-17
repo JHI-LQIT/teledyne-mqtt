@@ -107,5 +107,14 @@ def test_scope_dialog_round_trips_teledyne_settings(monkeypatch):
         assert dialog._params_to_settings() == {
             name: settings[name] for name in dialog.SECTIONS[section].values()
         }
+        if section == "scope":
+            toggled = []
+            dialog.settings_applied.connect(toggled.append)
+            dialog.params.child("Sampling", "Follow Scope").setValue(True)
+            assert len(toggled) == 1
+            assert toggled[0]["sampling"]["follow_scope"] is True
+            assert not dialog.params.child("Sampling", "Maximum Points").opts["enabled"]
+            assert not dialog.params.child("Sampling", "Transfer Stride").opts["enabled"]
+            assert not dialog.params.child("Channels", "C1").opts["enabled"]
         dialog.deleteLater()
     app.processEvents()

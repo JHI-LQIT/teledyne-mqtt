@@ -222,7 +222,11 @@ class WaveformMQTTHandler:
             # Filter channels based on publish flag in scope_settings
             channels_to_publish = {}
             settings = self.scope_settings if scope_settings is None else scope_settings
-            channel_configs = settings.get("channels", [])
+            channel_configs = (
+                capture_data["channel_settings"]
+                if capture_data.get("follow_scope")
+                else settings.get("channels", [])
+            )
             publishing_config = settings.get("publishing", {})
             publishing_channels = publishing_config.get("channels", {})
 

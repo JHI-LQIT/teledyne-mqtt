@@ -12,7 +12,7 @@ MAX_POINTS = 1_000_000
 
 def get_default_scope_settings():
     return {
-        "sampling": {"num_samples": 100_000, "transfer_stride": 1},
+        "sampling": {"follow_scope": False, "num_samples": 100_000, "transfer_stride": 1},
         "trigger_settings": {"mode": "auto"},
         "channels": [{"channel": "A"}],
         "postprocessing": {
@@ -85,6 +85,8 @@ def prepare_settings_update(current, update):
 
     candidate = _merge_settings(_merge_settings(defaults, current), patch)
     sampling = candidate["sampling"]
+    if type(sampling["follow_scope"]) is not bool:
+        raise ValueError("follow_scope must be a boolean")
     _integer(sampling["num_samples"], "num_samples", 1, MAX_POINTS)
     _integer(sampling["transfer_stride"], "transfer_stride", 1, MAX_POINTS)
 

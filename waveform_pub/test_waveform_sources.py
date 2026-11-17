@@ -208,3 +208,62 @@ def test_list_usb_command_lists_resources_and_closes_manager(capsys):
         assert main(["--list-usb", "--visa-backend", "@ivi"]) == 0
     assert capsys.readouterr().out.strip() == USB_SCOPE
     manager.close.assert_called_once()
+
+
+def test_follow_scope_downloads_full_record_and_downsamples_for_mqtt():
+    settings, _ = prepare_settings_update(get_default_scope_settings(), {
+        "sampling": {"follow_scope": True, "num_samples": 2, "transfer_stride": 5},
+        "postprocessing": {"down_sample_ratio": 2},
+    })
+    scope = Mock()
+    replies = {
+        "*IDN?": "Teledyne LeCroy,T3DSO1204,123,1.0",
+        "C1:TRA?": "OFF",
+        "C2:TRA?": "ON",
+        "C3:TRA?": "OFF",
+        "C4:TRA?": "OFF",
+        "C2:UNIT?": "V",
+        "C2:VDIV?": "C2:VDIV 1.00E+00V",
+        "C2:OFST?": "C2:OFST -1.00E-01V",
+        "WFSU?": "WFSU SP,0,NP,0,FP,0",
+        "INR?": "INR 1",
+        "SARA?": "SARA 10Sa/s",
+        "TDIV?": "TDIV 5.00E-02S",
+        "TRDL?": "TRDL 0S",
+        "SANU? C2": "SANU 7.00E+00pts",
+    }
+    scope.query.side_effect = replies.__getitem__
+    scope.read_raw.return_value = b"C2:WF DAT2,#17\x00\x01\x02\x03\x04\x05\x06\n\n"
+    manager = Mock()
+    manager.open_resource.return_value = scope
+    source = TeledyneSource(settings, usb_resource=USB_SCOPE, visa_backend="@ivi")
+    capture = WaveformDataCaptureManager(settings, source=source)
+    with patch("waveform_sources.pyvisa.ResourceManager", return_value=manager):
+        try:
+            capture.open_device()
+            frame = capture.run_capture_cycle()
+        finally:
+            capture.close_device()
+
+    scope.write.assert_any_call("WFSU SP,0,NP,0,FP,0")
+    scope.write.assert_any_call("C2:WF? DAT2")
+    assert frame["raw_sample_count"] == frame["scope_record_points"] == 7
+    assert frame["transfer_stride"] == 1
+    assert frame["down_sample_ratio"] == 2
+    np.testing.assert_allclose(frame["time_axis"], [-0.3, -0.1, 0.1], atol=1e-12)
+    np.testing.assert_allclose(frame["channels_mv"]["B"], [[120, 200, 280]])
+
+    handler = WaveformMQTTHandler("localhost", 1883, "scope/waveform", settings)
+    handler.connected = True
+    handler.client.publish = Mock(return_value=SimpleNamespace(rc=0))
+    assert handler.publish_waveform(frame)
+    payload = handler.client.publish.call_args.args[1]
+    _, _, dt, _, channels, samples = struct.unpack_from("<4sddQII", payload)
+    assert (channels, samples, dt) == (1, 3, 0.2)
+    assert payload[36:38] == b"\x01b"
+    np.testing.assert_allclose(np.frombuffer(payload, dtype="<f8", offset=38), [120, 200, 280])
+
+    settings["publishing"]["channels"]["B"]["publish"] = False
+    handler.client.publish.reset_mock()
+    assert handler.publish_waveform(frame)
+    handler.client.publish.assert_not_called()

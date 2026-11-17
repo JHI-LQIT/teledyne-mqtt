@@ -48,12 +48,17 @@ For a connection-free scope demo, run `python waveform_pub/waveform_pub.py --sim
 | Setting | Behavior |
 | --- | --- |
 | Channels | Select the analog traces to download. Enable those traces on the scope first. |
-| Maximum Points | Maximum number of downloaded samples per channel, from the beginning of the record. Defaults to 100,000. |
-| Transfer Stride | Download every Nth sample. Defaults to 1. Increase it to cover more of a long record with fewer points. |
+| Follow Scope | Download the full record at stride 1 for all analog channels enabled on the scope. The plot uses each trace's V/div and position. |
+| Maximum Points | Maximum number of downloaded samples per channel, from the beginning of the record. Defaults to 100,000 and applies in manual mode. |
+| Transfer Stride | Download every Nth sample. Defaults to 1. Increase it in manual mode to cover more of a long record with fewer points. |
 | Auto | The scope can acquire without a valid trigger. |
 | Normal | The app arms one sweep per waveform and waits for a valid trigger. |
 | Downsample Ratio | Average adjacent downloaded samples on the computer. Use 0 to keep every point. The averaged sample is timed at the center of its group. |
 | Publishing | Select which acquired channels to send to MQTT. |
+
+To use the same record as the scope, choose **Scope Settings → Sampling → Follow Scope**. The status bar shows the scope's points per channel, timebase and trigger delay. **Postprocessing → Downsample Ratio** averages downloaded samples for both the plot and MQTT. For example, a ratio of 100 turns a 7,000,000-point record into 70,000 points per channel across the same time interval. The USB transfer still reads the full record. MQTT continues to carry calibrated millivolts, and the Publishing dialog controls which channels are sent.
+
+The app uses its **Sweep Mode** setting to arm each capture. Set trigger source, slope, level, timebase, memory depth and the channel settings on the scope.
 
 The app stops the scope between captures to read all selected channels from the same acquisition. It leaves the scope stopped on exit. The scope reports the actual sample rate, scale, and offset. The app applies the scope's trigger delay to the time axis and uses the host UTC time when a completed sweep is detected for the packet timestamp. See the [T3DSO1000/2000 programming manual](https://cdn.teledynelecroy.com/files/manuals/tds031000-2000_programming_manual.pdf).
 
@@ -73,6 +78,8 @@ For example, this settings patch selects C1 and C2 and downloads at most 20,000 
 ```json
 {"sampling":{"num_samples":20000,"transfer_stride":4},"channels":[{"channel":"A"},{"channel":"B"}]}
 ```
+
+To enable Follow Scope over MQTT, send `{"sampling":{"follow_scope":true}}`.
 
 The channel IDs `A`, `B`, `C`, and `D` map to scope inputs `C1`–`C4`. Their lowercase IDs appear in waveform packets. The GUI persists changes to `waveform_pub/scope_settings.json`. MQTT changes apply for the running session.
 

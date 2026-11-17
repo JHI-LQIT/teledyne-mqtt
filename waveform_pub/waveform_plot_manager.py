@@ -42,6 +42,7 @@ class WaveformPlotManager:
         # Store last postprocessed data to keep it visible between updates
         self._last_processed_channels = None
         self._last_processing_info = None
+        self._scope_grid = None
 
         # Settings callback
         self.settings_actions = settings_actions or {}
@@ -75,6 +76,7 @@ class WaveformPlotManager:
     def _set_waveform_axis_units(plot):
         # Captures store millivolts and seconds. Format voltage ticks in
         # volts before PyQtGraph chooses an SI prefix for either axis.
+        plot.getAxis("left").enableAutoSIPrefix(True)
         plot.getAxis("left").setScale(1e-3)
         plot.setLabel("left", "Voltage", "V")
         plot.setLabel("bottom", "Time", "s")
@@ -160,6 +162,7 @@ class WaveformPlotManager:
         original_channels_mv=None,
         processing_info=None,
         show_original=False,
+        scope_scales=None,
     ):
         """Update waveform plots using curve.setData()
 
@@ -171,6 +174,7 @@ class WaveformPlotManager:
             original_channels_mv (dict): Original channel data (if showing originals)
             processing_info (dict): Processing metadata per channel
             show_original (bool): Whether to show original waveforms
+            scope_scales (dict): Optional per-channel volts/div and position for scope view
         """
         logger.debug(
             f"update_waveform_plots called: channels={len(channels_mv) if channels_mv else None}, "
@@ -402,7 +406,7 @@ class WaveformPlotManager:
             if hasattr(data, "shape") and segment_index < data.shape[0]:
                 if channel in self.plot_curves:
                     # Get data for the specified segment
-                    y_data = data[segment_index, :]
+                    y_data = self._plot_values(data[segment_index, :], channel, scope_scales)
                     x_data = time_axis
 
                     # Update curve label if postprocessing info has changed
@@ -462,7 +466,7 @@ class WaveformPlotManager:
                     and segment_index < data.shape[0]
                     and channel in self.original_plot_curves
                 ):
-                    y_data = data[segment_index, :]
+                    y_data = self._plot_values(data[segment_index, :], channel, scope_scales)
                     x_data = time_axis
                     self.original_plot_curves[channel].setData(x_data, y_data)
                     logger.debug(
@@ -551,6 +555,7 @@ class WaveformPlotManager:
             self.plot_curves = {}
             self.original_plot_curves = {}
             self._update_counter = 0
+            self._scope_grid = None
 
     def exec_app(self):
         """Execute Qt application event loop
@@ -602,10 +607,41 @@ class WaveformPlotManager:
             self._update_counter = 0  # Reset counter so auto-range works on next update
             logger.debug("Plot view reset - auto-range enabled, counter reset")
 
+    @staticmethod
+    def _plot_values(values_mv, channel, scope_scales):
+        if scope_scales is None:
+            return values_mv
+        settings = scope_scales[channel]
+        # Restore the scope's screen position while keeping physical voltages in MQTT.
+        return (values_mv * 1e-3 + settings["offset_volts"]) / settings["volts_per_div"]
+
     def display_capture(self, capture_data, segment_index=0):
         """Render a capture, retaining the previous plot while averaging."""
         processing_info = capture_data.get("processing_info") or {}
         if not is_simple_average_pending(processing_info):
+            scope_scales = None
+            grid = None
+            if capture_data.get("follow_scope"):
+                scope_scales = {
+                    settings["channel"]: settings for settings in capture_data["channel_settings"]
+                }
+                grid = (
+                    capture_data["seconds_per_div"],
+                    capture_data["trigger_delay_s"],
+                    capture_data["raw_sample_count"],
+                    capture_data["actual_sample_rate"],
+                )
+            if grid != self._scope_grid and self.plot_widget is not None:
+                self.reset_plot_view()
+                if grid is None:
+                    self._set_waveform_axis_units(self.plot_widget)
+                else:
+                    axis = self.plot_widget.getAxis("left")
+                    axis.enableAutoSIPrefix(False)
+                    axis.setScale(1)
+                    self.plot_widget.setLabel("left", "Vertical position", "div")
+                self._scope_grid = grid
+
             self.update_waveform_plots(
                 channels_mv=capture_data["channels_mv"],
                 time_axis=capture_data["time_axis"],
@@ -614,5 +650,6 @@ class WaveformPlotManager:
                 original_channels_mv=capture_data.get("original_channels_mv") or {},
                 processing_info=processing_info,
                 show_original=capture_data.get("show_original", False),
+                scope_scales=scope_scales,
             )
         self.update_status_bar(capture_data)

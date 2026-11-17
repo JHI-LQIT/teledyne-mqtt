@@ -208,6 +208,12 @@ class ScopeSettingsDialog(QtWidgets.QDialog):
                 "type": "group",
                 "children": [
                     {
+                        "name": "Follow Scope",
+                        "type": "bool",
+                        "value": sampling.get("follow_scope", False),
+                        "tip": "Download the full record for each enabled scope channel and use its display scale.",
+                    },
+                    {
                         "name": "Maximum Points",
                         "type": "int",
                         "value": sampling["num_samples"],
@@ -301,6 +307,7 @@ class ScopeSettingsDialog(QtWidgets.QDialog):
     def _scope_from_params(self):
         return {
             "sampling": {
+                "follow_scope": self.params.child("Sampling", "Follow Scope").value(),
                 "num_samples": self.params.child("Sampling", "Maximum Points").value(),
                 "transfer_stride": self.params.child("Sampling", "Transfer Stride").value(),
             },
@@ -380,7 +387,17 @@ class ScopeSettingsDialog(QtWidgets.QDialog):
                 item.displayLabel.setToolTip(tip)
                 item.defaultBtn.setToolTip("Restore this field to its default value.")
             items += 1
+        self._update_sampling_controls()
         self.params.sigTreeStateChanged.connect(self._on_parameter_changed)
+
+    def _update_sampling_controls(self):
+        if self.section == "scope":
+            sampling = self.params.child("Sampling")
+            manual = not sampling.child("Follow Scope").value()
+            for field in ("Maximum Points", "Transfer Stride"):
+                sampling.child(field).setOpts(enabled=manual)
+            for channel in self.params.child("Channels").children():
+                channel.setOpts(enabled=manual)
 
     def _apply_section(self, settings):
         keys = self.SECTIONS[self.section].values()
@@ -393,7 +410,10 @@ class ScopeSettingsDialog(QtWidgets.QDialog):
             param: Parameter that changed
             changes: List of changes
         """
+        if not any(change == "value" for _, change, _ in changes):
+            return
         try:
+            self._update_sampling_controls()
             self._apply_section(self._params_to_settings())
         except Exception:
             logger.exception("Error submitting settings")

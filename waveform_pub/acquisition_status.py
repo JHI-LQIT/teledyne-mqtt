@@ -88,6 +88,13 @@ def build_acquisition_status(capture_data):
         f"Span: {_format_duration(span_seconds)}",
         f"Channels: {_format_channels(channel_settings)}",
     ]
+    if capture_data.get("follow_scope"):
+        record_points = capture_data["scope_record_points"]
+        parts.extend((
+            f"Scope: {record_points:,} pts/ch",
+            f"Timebase: {_format_duration(capture_data['seconds_per_div'])}/div",
+            f"Delay: {capture_data['trigger_delay_s'] * 1000:g} ms",
+        ))
     if stride > 1:
         parts.append(f"Transfer stride: {stride}")
     if ratio > 1 or stride > 1:

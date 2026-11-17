@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 _CAPTURE_READY = 1
 _VOLTAGE_CODES_PER_DIVISION = 25
 _HORIZONTAL_DIVISIONS = 14
+_MAX_RECORD_POINTS = 14_000_000
 _PREFIXES = {"": 1, "n": 1e-9, "u": 1e-6, "m": 1e-3, "k": 1e3, "K": 1e3, "M": 1e6, "G": 1e9}
 _NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?"
 
@@ -155,24 +156,37 @@ class TeledyneSource:
     def _selected_channels(self):
         return [channel["channel"] for channel in self.scope_settings["channels"]]
 
+    def _channel_enabled(self, trace):
+        return self.scope.query(f"{trace}:TRA?").split()[-1].upper() == "ON"
+
+    def _active_channels(self, follow_scope):
+        if not follow_scope:
+            return self._selected_channels()
+        enabled = [name for name, trace in CHANNELS.items() if self._channel_enabled(trace)]
+        if not enabled:
+            raise ValueError("Enable at least one analog channel on the oscilloscope")
+        return enabled
+
     def configure(self):
-        for name in self._selected_channels():
+        sampling = self.scope_settings["sampling"]
+        follow_scope = sampling.get("follow_scope", False)
+        for name in self._active_channels(follow_scope):
             trace = CHANNELS[name]
-            if self.scope.query(f"{trace}:TRA?").split()[-1].upper() != "ON":
+            if not follow_scope and not self._channel_enabled(trace):
                 raise ValueError(f"Enable {trace} on the oscilloscope before selecting it")
             self._check_voltage_unit(trace)
-        sampling = self.scope_settings["sampling"]
-        stride = sampling["transfer_stride"]
+        stride = 1 if follow_scope else sampling["transfer_stride"]
+        points = 0 if follow_scope else sampling["num_samples"]
         scope_stride = stride if stride > 1 else 0
         self.scope.write("STOP")
         self._configured = True
-        self.scope.write(f"WFSU SP,{scope_stride},NP,{sampling['num_samples']},FP,0")
+        self.scope.write(f"WFSU SP,{scope_stride},NP,{points},FP,0")
         # Ensure the command was accepted before publishing a waveform with this time grid.
         actual = self.scope.query("WFSU?")
         fields = dict(re.findall(r"\b(SP|NP|FP)\s*,\s*(\d+)", actual.upper()))
         if (
             int(fields.get("SP", -1)) not in ({0, 1} if stride == 1 else {stride})
-            or int(fields.get("NP", -1)) != sampling["num_samples"]
+            or int(fields.get("NP", -1)) != points
             or fields.get("FP") != "0"
         ):
             raise ValueError(f"Scope rejected the waveform transfer settings: {actual.strip()!r}")
@@ -211,30 +225,50 @@ class TeledyneSource:
         scale = _parse_quantity(self.scope.query("TDIV?"), "S", positive=True)
         delay = _parse_quantity(self.scope.query("TRDL?"), "S")
         sampling = self.scope_settings["sampling"]
+        follow_scope = sampling.get("follow_scope", False)
+        names = self._active_channels(follow_scope)
+        max_points = _MAX_RECORD_POINTS if follow_scope else sampling["num_samples"]
+        record_points = None
+        if follow_scope:
+            reply = self.scope.query(f"SANU? {CHANNELS[names[0]]}")
+            record_points = int(_parse_quantity(reply, "pts", positive=True))
+
         voltages = {}
         channel_settings = []
-        for name in self._selected_channels():
+        for name in names:
             self._check_interrupt(interrupt)
             trace = CHANNELS[name]
             self._check_voltage_unit(trace)
             vdiv = _parse_quantity(self.scope.query(f"{trace}:VDIV?"), "V", positive=True)
             offset = _parse_quantity(self.scope.query(f"{trace}:OFST?"), "V")
             self.scope.write(f"{trace}:WF? DAT2")
-            codes = _decode_dat2(self.scope.read_raw(), sampling["num_samples"])
+            codes = _decode_dat2(self.scope.read_raw(), max_points)
             # The T3DSO1000(A) DAT2 manual specifies subtracting 255 for codes >127.
             values = codes.astype(np.float64)
             values[codes > 127] -= 255
-            voltages[name] = ((values * (vdiv / _VOLTAGE_CODES_PER_DIVISION) - offset) * 1000)[None, :]
-            channel_settings.append({"channel": name, "volts_per_div": vdiv})
+            values *= vdiv / _VOLTAGE_CODES_PER_DIVISION
+            values -= offset
+            values *= 1000
+            voltages[name] = values[None, :]
+            channel_settings.append({
+                "channel": name, "volts_per_div": vdiv, "offset_volts": offset,
+            })
         lengths = {samples.shape[-1] for samples in voltages.values()}
         if len(lengths) != 1:
             raise ValueError("Analog channels returned different waveform lengths")
         points = lengths.pop()
-        stride = sampling["transfer_stride"]
+        stride = 1 if follow_scope else sampling["transfer_stride"]
         start = delay - scale * (_HORIZONTAL_DIVISIONS / 2)
+        time_axis = np.arange(points, dtype=np.float64)
+        time_axis *= stride / rate
+        time_axis += start
         return {
             "channels_mv": voltages,
-            "time_axis": start + np.arange(points) * (stride / rate),
+            "time_axis": time_axis,
+            "follow_scope": follow_scope,
+            "scope_record_points": record_points,
+            "seconds_per_div": scale,
+            "trigger_delay_s": delay,
             "actual_sample_rate": rate,
             "transfer_stride": stride,
             "raw_sample_count": points,
