@@ -127,8 +127,6 @@ class WaveformPlotManager:
             self._set_waveform_axis_units(self.plot_widget)
             self.plot_widget.addLegend()
             self.plot_widget.showGrid(x=True, y=True)
-            self.plot_widget.setDownsampling(auto=True, mode="peak")
-            self.plot_widget.setClipToView(True)
 
             # Create status bar
             self.status_bar = QtWidgets.QStatusBar()
@@ -471,10 +469,13 @@ class WaveformPlotManager:
                         f"update_waveform_plots: Updated original curve for {channel}"
                     )
 
-        # Disable auto-range after first update (matching PyQtGraph example pattern)
         if self._update_counter == 0 and self.plot_widget is not None:
+            # Fit the full data before enabling display optimizations. They use
+            # the current view and can hide the first trace in the default range.
+            self.plot_widget.autoRange()
             self.plot_widget.enableAutoRange("xy", False)
-            logger.debug("Auto-range disabled after first update")
+            self.plot_widget.setDownsampling(auto=True, mode="peak")
+            self.plot_widget.setClipToView(True)
 
         self._update_counter += 1
 
@@ -549,6 +550,7 @@ class WaveformPlotManager:
             self.plot_widget = None
             self.plot_curves = {}
             self.original_plot_curves = {}
+            self._update_counter = 0
 
     def exec_app(self):
         """Execute Qt application event loop
@@ -592,6 +594,9 @@ class WaveformPlotManager:
             self._last_processed_channels = None
             self._last_processing_info = None
 
+            # Prepare the next data set for a full-range fit.
+            self.plot_widget.setDownsampling(auto=False)
+            self.plot_widget.setClipToView(False)
             # Re-enable auto-range for next update to adjust to new data dimensions
             self.plot_widget.enableAutoRange("xy", True)
             self._update_counter = 0  # Reset counter so auto-range works on next update
