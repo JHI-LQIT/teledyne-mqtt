@@ -221,3 +221,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local oscilloscope settings
+waveform_pub/scope_settings.json

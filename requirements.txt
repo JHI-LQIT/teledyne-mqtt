@@ -1,0 +1,7 @@
+numpy>=1.26
+paho-mqtt>=2.1
+PyQt5>=5.15.11
+pyqtgraph>=0.14
+PyYAML>=6
+PyVISA>=1.14
+PyVISA-py>=0.7

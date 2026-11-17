@@ -1,0 +1,20 @@
+# Configuration for Teledyne MQTT
+# This file controls MQTT broker settings for all modules
+scope:
+  host: ""  # IP address or hostname of the T3DSO1204 on the LAN
+
+
+mqtt:
+  # Broker connection settings
+  broker: "localhost" # MQTT broker hostname or IP address
+  port: 1883 # MQTT broker port (default: 1883, 8883 for SSL/TLS)
+
+  # Waveform publisher settings
+  waveform:
+    topic: "lqt/teledyne/waveform" # Topic for publishing waveform data
+    config_topic: "lqt/teledyne/config" # Topic for publishing configuration changes
+
+  # Optional overrides. The default settings topics follow the waveform prefix.
+  # settings:
+  #   command_topic: "lqt/teledyne/cmnd/settings"
+  #   response_topic: "lqt/teledyne/response/settings"
