@@ -45,7 +45,11 @@ class WaveformMQTTHandler:
         self.scope_settings = scope_settings or {}
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, protocol=mqtt.MQTTv5)
         self.client.max_queued_messages_set(16)
+        self.client.max_inflight_messages_set(1)
         self.connected = False
+        self._maximum_packet_size = 268435460
+        self._pending_waveform = None
+        self._last_size_warning = None
 
         self.connected_callback: Callable[[], None] | None = None
         self.publish_waveform_callback: Callable[[dict], bool] | None = None
@@ -61,6 +65,8 @@ class WaveformMQTTHandler:
     def _on_connect(self, client, userdata, flags, reason_code, properties):
         """MQTT connection callback"""
         if reason_code == 0:
+            self._maximum_packet_size = getattr(properties, "MaximumPacketSize", 268435460)
+            logger.info("MQTT broker maximum packet size: %s bytes", self._maximum_packet_size)
             # Subscribe to command topics
             self.client.subscribe(self.request_topic)
             self.client.subscribe(self.settings_topic)
@@ -75,7 +81,10 @@ class WaveformMQTTHandler:
     def _on_disconnect(self, client, userdata, flags, reason_code, properties):
         """MQTT disconnection callback"""
         self.connected = False
-        logger.info("Disconnected from MQTT broker")
+        logger.info(
+            "Disconnected from MQTT broker: %s (server disconnect=%s)",
+            reason_code, flags.is_disconnect_packet_from_server,
+        )
 
     def connect(self):
         """Connect to MQTT broker"""
@@ -307,11 +316,36 @@ class WaveformMQTTHandler:
             return False
 
     def submit_waveform(self, payload):
-        """Queue an encoded waveform for transmission by Paho."""
+        """Queue one waveform within the broker's packet and delivery limits."""
+        if not self.connected:
+            return False
         properties = Properties(PacketTypes.PUBLISH)
         properties.UserProperty = [("sample_unit", "mV"), ("time_unit", "s")]
+        # QoS 1 adds a two-byte packet identifier. Properties.pack() includes
+        # the property-length field, and the fixed header uses a variable length.
+        remaining = 2 + len(self.topic.encode("utf-8")) + 2 + len(properties.pack()) + len(payload)
+        length_bytes = max(1, (remaining.bit_length() + 6) // 7)
+        packet_size = 1 + length_bytes + remaining
+        if remaining > 268435455 or packet_size > self._maximum_packet_size:
+            signature = (len(payload), self._maximum_packet_size)
+            if signature != self._last_size_warning:
+                logger.error(
+                    "Waveform MQTT packet is %s bytes, exceeding the broker limit of %s bytes. "
+                    "Increase Postprocessing > Downsample Ratio or the broker max_packet_size. "
+                    "This waveform was skipped.",
+                    packet_size, self._maximum_packet_size,
+                )
+                self._last_size_warning = signature
+            return False
+        self._last_size_warning = None
+
+        # Avoid accumulating large frames while the broker is still acknowledging
+        # an earlier frame. Leave queue space for configuration and control replies.
+        if self._pending_waveform is not None and not self._pending_waveform.is_published():
+            return False
         result = self.client.publish(self.topic, payload, qos=1, properties=properties)
         if result.rc == mqtt.MQTT_ERR_SUCCESS:
+            self._pending_waveform = result
             logger.debug("Queued %s bytes of waveform data to %s", len(payload), self.topic)
             return True
         logger.error("Failed to publish to MQTT, return code: %s", result.rc)

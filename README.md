@@ -85,6 +85,8 @@ The channel IDs `A`, `B`, `C`, and `D` map to scope inputs `C1`–`C4`. Their lo
 
 The binary payload uses the PicoScope MQTT `WAVE` format. A little-endian `<4sddQII` header carries the magic bytes, start time, sample interval, UTC timestamp in microseconds, channel count, and sample count per channel. Each channel name follows as a one-byte length and UTF-8 name. Float64 samples follow, interleaved by channel. MQTT 5 user properties announce `sample_unit=mV` and `time_unit=s`.
 
+If waveforms exceed the broker's MQTT packet limit, the app logs the packet size and skips those frames. Increase **Postprocessing → Downsample Ratio** until messages fit. A four-channel record of 7,000,000 samples produces about 2.24 MB at ratio 100 and 1.12 MB at ratio 200. Mosquitto 2.1 defaults to a 2,000,000-byte maximum packet, as documented in the [Mosquitto configuration reference](https://mosquitto.org/man/mosquitto-conf-5.html). Restart the app after updating to clear any waveform messages queued by an older version.
+
 ## Development
 
 ```sh

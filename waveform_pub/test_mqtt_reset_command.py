@@ -91,3 +91,30 @@ def test_online_gui_reset_preserves_mqtt_command():
 
     handler.client.publish.assert_called_once_with("scope/cmnd/reset", payload="", qos=1)
     publisher.data_capture.stop_continuous_capture.assert_not_called()
+
+
+def test_waveform_larger_than_broker_limit_is_rejected_before_queueing(caplog):
+    from paho.mqtt.packettypes import PacketTypes
+    from paho.mqtt.properties import Properties
+
+    handler = WaveformMQTTHandler("localhost", 1883, "scope/waveform")
+    handler.client.subscribe = Mock()
+    handler.client.publish = Mock()
+    properties = Properties(PacketTypes.CONNACK)
+    properties.MaximumPacketSize = 1024
+    handler._on_connect(handler.client, None, None, 0, properties)
+
+    assert not handler.submit_waveform(bytes(1024))
+    handler.client.publish.assert_not_called()
+    assert "Downsample Ratio" in caplog.text
+    assert handler.connected
+
+    pending = Mock(rc=0)
+    pending.is_published.return_value = False
+    handler.client.publish.return_value = pending
+    assert handler.submit_waveform(bytes(100))
+    assert not handler.submit_waveform(bytes(100))
+    handler.client.publish.assert_called_once()
+    pending.is_published.return_value = True
+    assert handler.submit_waveform(bytes(100))
+    assert handler.client.publish.call_count == 2
